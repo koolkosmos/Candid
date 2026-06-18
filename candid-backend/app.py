@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, JSONResponse
-from typing import Annotated, Optional
+from typing import Annotated, Optional, List
 import os
 import shutil
 import uuid
@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 import cloudinary
 import cloudinary.uploader
 
-from face_pipeline import get_embeddings
+from face_pipeline import get_embeddings, get_single_embedding, average_embeddings
 from faiss_index import (
     add_embeddings,
     search_embeddings,
@@ -77,12 +77,14 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
+
 def get_current_user(request: Request) -> dict:
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
     token = auth[7:]
     return decode_token(token)
+
 
 
 # Optional — returns None if not logged in instead of raising
@@ -106,6 +108,7 @@ def google_login():
         f"&access_type=offline"
     )
     return RedirectResponse(GOOGLE_AUTH_URL + params)
+
 
 
 @app.get("/auth/google/callback")
@@ -143,6 +146,7 @@ async def google_callback(code: str):
 
     # Redirect to frontend with token in query param
     return RedirectResponse(f"{FRONTEND_URL}/auth/callback?token={jwt_token}")
+
 
 
 @app.get("/auth/me")
@@ -297,12 +301,12 @@ async def upload_album(
 
 
 # =========================
-# 🔍 MATCH SELFIE
+# 🔍 MATCH SELFIE (supports multiple selfies for averaging)
 # =========================
 @app.post("/match/{event_id}")
 async def match_selfie(
     event_id: str,
-    file: UploadFile = File(...),
+    files: Annotated[list[UploadFile], File(...)],  # Changed to accept multiple files
     user: dict = Depends(get_current_user),
 ):
     load_event(event_id)
@@ -310,20 +314,32 @@ async def match_selfie(
     if event_id not in event_indexes:
         return {"error": "No data for this event"}
 
-    temp_path = f"selfie_{uuid.uuid4()}.jpg"
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # Extract embeddings from all uploaded selfies
+    all_embeddings = []
+    selfie_count = 0
 
-    embeddings = get_embeddings(temp_path)
-    os.remove(temp_path)
+    for file in files:
+        temp_path = f"selfie_{uuid.uuid4()}.jpg"
+        with open(temp_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
-    if embeddings is None or len(embeddings) == 0:
-        return {"error": "No face detected"}
+        embedding = get_single_embedding(temp_path)
+        os.remove(temp_path)
 
-    query_embedding = embeddings[0]
-    distances, indices = search_embeddings(event_id, query_embedding, k=5)
 
-    threshold = 0.8
+        if embedding is not None:
+            all_embeddings.append(embedding)
+            selfie_count += 1
+
+    if selfie_count == 0:
+        return {"error": "No face detected in any selfie"}
+
+    # Average all embeddings for more robust matching
+    query_embedding = average_embeddings(all_embeddings)
+
+    sims, inds = search_embeddings(event_id, query_embedding, k=10)  # Increased k for better recall
+
+    threshold = float(os.getenv("MATCH_THRESH", "0.5"))  # Lowered default threshold for IP (cosine)
     matches = []
     seen_images = set()
 
@@ -340,21 +356,33 @@ async def match_selfie(
             return None, image_field, entry.get("visibility", "private"), username
         return None, None, "private", username
 
-    for dist, idx in zip(distances[0], indices[0]):
+    for sim, idx in zip(sims, inds):
         if idx < 0 or idx >= len(event_image_maps[event_id]):
             continue
         entry = event_image_maps[event_id][idx]
         image_id, image_url, visibility, username = extract(entry)
         if not image_url:
             continue
-        # Only add photo if face match found (distance < threshold)
-        if dist < threshold:
+        # Only add photo if similarity exceeds threshold
+        if sim >= threshold:
             if image_url not in seen_images:
-                matches.append({"id": image_id, "image_url": image_url, "distance": float(dist), "visibility": visibility, "username": username})
+                matches.append({
+                    "id": image_id,
+                    "image_url": image_url,
+                    "score": float(sim),
+                    "visibility": visibility,
+                    "username": username,
+                })
                 seen_images.add(image_url)
         # For public photos without match, don't add to "Your Photos" - they'll appear in Public Gallery instead
 
-    return {"matches": matches}
+    return {
+        "matches": matches,
+        "metadata": {
+            "selfies_processed": selfie_count,
+            "averaged": True
+        }
+    }
 
 
 # =========================
@@ -366,6 +394,7 @@ def get_my_photos(event_id: str, user: dict = Depends(get_current_user)):
 
     if event_id not in event_image_maps:
         return {"photos": []}
+
 
     # Deduplicate by image_url - one entry per photo
     seen_urls = set()
@@ -431,6 +460,7 @@ def make_public(
         return {"error": "Image or event not found"}
     save_event(event_id)
     return {"message": "Image is now public"}
+
 
 
 # =========================
