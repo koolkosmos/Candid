@@ -22,6 +22,7 @@ function PreviewCard({ file, visibility, onToggle, onRemove }) {
   const url = URL.createObjectURL(file);
   const isPublic = visibility === "public";
 
+
   return (
     <div style={{
       position: "relative", borderRadius: 16, overflow: "hidden",
@@ -68,6 +69,32 @@ function PreviewCard({ file, visibility, onToggle, onRemove }) {
   );
 }
 
+// ─── Selfie preview card (for multiple selfies) ────────────────
+function SelfiePreviewCard({ file, onRemove }) {
+  const url = URL.createObjectURL(file);
+
+  return (
+    <div style={{
+      position: "relative", borderRadius: 12, overflow: "hidden",
+      aspectRatio: "1/1", background: "#f5f5f5",
+      boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
+    }}>
+      <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+      <button
+        onClick={onRemove}
+        style={{
+          position: "absolute", top: 4, right: 4,
+          width: 20, height: 20, borderRadius: "50%",
+          background: "rgba(255,255,255,0.95)", border: "none",
+          color: "#333", fontSize: 12, cursor: "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          lineHeight: 1, boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
+        }}
+      >✕</button>
+    </div>
+  );
+}
+
 // ─── Match photo card ───────────────────────────────────────────
 function PhotoCard({ img, onToggleVisibility, currentUserName }) {
   const [hovered, setHovered] = useState(false);
@@ -75,6 +102,8 @@ function PhotoCard({ img, onToggleVisibility, currentUserName }) {
   const isPublic = img.visibility === "public";
   const canToggle = img.username === currentUserName;
 
+  // Handle both old 'distance' and new 'score' fields
+  const matchScore = img.score != null ? img.score : (img.distance != null ? 1 - img.distance : null);
 
   const handleToggle = async () => {
     if (toggling || !canToggle) return;
@@ -110,7 +139,7 @@ function PhotoCard({ img, onToggleVisibility, currentUserName }) {
         <VisBadge pub={isPublic} />
       </div>
 
-      {img.distance != null && (
+      {matchScore != null && (
         <div style={{
           position: "absolute", top: 10, right: 10,
           background: "linear-gradient(135deg, #833ab4, #fd1d1d)",
@@ -118,7 +147,7 @@ function PhotoCard({ img, onToggleVisibility, currentUserName }) {
           fontSize: 11, color: "white", fontWeight: 600,
           boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
         }}>
-          {Math.round((1 - img.distance) * 100)}% match
+          {Math.round(matchScore * 100)}% match
         </div>
       )}
 
@@ -132,6 +161,7 @@ function PhotoCard({ img, onToggleVisibility, currentUserName }) {
           👤 {img.username}
         </div>
       )}
+
 
       {canToggle && (
         <div style={{
@@ -183,7 +213,7 @@ export default function Dashboard({ eventId }) {
 
   const [files, setFiles] = useState([]);
   const [visibilities, setVisibilities] = useState([]);
-  const [selfie, setSelfie] = useState(null);
+  const [selfies, setSelfies] = useState([]);  // Changed from single selfie to array
   const [matches, setMatches] = useState([]);
   const [publicPhotos, setPublicPhotos] = useState([]);
   const [myPhotos, setMyPhotos] = useState([]);
@@ -234,6 +264,7 @@ export default function Dashboard({ eventId }) {
     fetchMyPhotos();
   }, [eventId]);
 
+
   const addFiles = (newFiles) => {
     const imgs = Array.from(newFiles).filter(f => f.type.startsWith("image/"));
     setFiles(prev => [...prev, ...imgs]);
@@ -247,6 +278,16 @@ export default function Dashboard({ eventId }) {
 
   const toggleVis = (i) => {
     setVisibilities(prev => prev.map((v, idx) => idx === i ? (v === "private" ? "public" : "private") : v));
+  };
+
+  // Add selfies (multiple allowed)
+  const addSelfies = (newFiles) => {
+    const imgs = Array.from(newFiles).filter(f => f.type.startsWith("image/"));
+    setSelfies(prev => [...prev, ...imgs]);
+  };
+
+  const removeSelfie = (i) => {
+    setSelfies(prev => prev.filter((_, idx) => idx !== i));
   };
 
   const handleUpload = async () => {
@@ -271,14 +312,22 @@ export default function Dashboard({ eventId }) {
   };
 
   const handleFind = async () => {
-    if (!selfie) { alert("Upload a selfie"); return; }
+    if (!selfies.length) { alert("Upload at least one selfie"); return; }
     setFinding(true);
     const formData = new FormData();
-    formData.append("file", selfie);
+    // Send all selfies as multiple files
+    selfies.forEach(f => formData.append("files", f));
     try {
       const res = await authFetch(`${API}/match/${eventId}`, { method: "POST", body: formData });
       const data = await res.json();
-      setMatches(data.matches || []);
+      if (data.error) {
+        alert(data.error);
+      } else {
+        setMatches(data.matches || []);
+        if (data.metadata?.selfies_processed) {
+          console.log(`Processed ${data.metadata.selfies_processed} selfies`);
+        }
+      }
     } catch (e) { console.error(e); alert("Search failed"); }
     setFinding(false);
   };
@@ -386,6 +435,11 @@ export default function Dashboard({ eventId }) {
           margin-top:12px;
         }
 
+        .selfie-grid {
+          display:grid; grid-template-columns:repeat(auto-fill, minmax(80px,1fr)); gap:8px;
+          margin-top:12px;
+        }
+
         .photo-grid {
           display:grid; grid-template-columns:repeat(auto-fill, minmax(160px,1fr)); gap:16px;
         }
@@ -425,7 +479,7 @@ export default function Dashboard({ eventId }) {
             background: "linear-gradient(135deg, #833ab4, #fd1d1d, #fcb045)",
             WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
           }}>✨ CANDID</span>
-          <span style={{ color:"#ddd" }}u003e·</span>
+          <span style={{ color:"#ddd" }}>·</span>
           <span style={{ fontSize:13, color:"#666", display:"flex", alignItems:"center", gap: 6 }}>
             <span className="live-dot" />Live Event
           </span>
@@ -505,7 +559,7 @@ export default function Dashboard({ eventId }) {
               onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
               onDragLeave={() => setDragging(false)}
               onDrop={(e) => { e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}
-            }
+            >
               <div style={{ fontSize:28, marginBottom:6 }}>📸</div>
               <div style={{ color:"#666", fontSize:14 }}>
                 {files.length > 0 ? `${files.length} photo${files.length > 1 ? "s" : ""} selected` : "Drop photos or tap to browse"}
@@ -515,8 +569,8 @@ export default function Dashboard({ eventId }) {
             </div>
 
             {/* Preview grid */}
-            {files.length > 0 &, (
-              >
+            {files.length > 0 && (
+              <>
                 <div style={{ fontSize:11, color:"#999", marginTop:14, marginBottom:6, fontWeight:600, letterSpacing:"1.5px", textTransform:"uppercase" }}>
                   Preview — tap to toggle
                 </div>
@@ -551,30 +605,46 @@ export default function Dashboard({ eventId }) {
                     }}
                   >All Public</button>
                 </div>
-              </)
-            }
+              </>
+            )}
 
             <button className="btn-primary" onClick={handleUpload} disabled={uploading} style={{ marginTop:16 }}>
-              {uploading ? ><span className="spinner" />Uploading…</button> : "🚀 Upload Photos"}
+              {uploading ? <><span className="spinner" />Uploading…</> : "🚀 Upload Photos"}
             </button>
           </div>
 
-          {/* Find section */}
+          {/* Find section - now supports multiple selfies */}
           <div className="section-card">
             <div style={{ fontSize:14, fontWeight:600, marginBottom:14, color:"#333" }}>🔍 Find Your Photos</div>
+            <div style={{ fontSize:12, color: "#888", marginBottom: 12 }}>
+              Upload multiple selfies for better matching (recommended: 2-5 photos from different angles)
+            </div>
 
             <label className="selfie-zone" style={{ display:"block" }}>
-              <input ref={selfieRef} type="file" accept="image/*" style={{ display:"none" }}
-                onChange={(e) => setSelfie(e.target.files[0])} />
-              {selfie
-                ? <div style={{ fontSize:14, color:"#00c6ff", fontWeight: 600 }}>✓ {selfie.name}</div>
-                : ><div style={{ fontSize:26, marginBottom:4 }}>🤳</div>
-                   <div style={{ fontSize:13, color:"#888" }}>Upload your selfie</div>}
+              <input ref={selfieRef} type="file" multiple accept="image/*" style={{ display:"none" }}
+                onChange={(e) => addSelfies(e.target.files)} />
+              {selfies.length > 0
+                ? <div style={{ fontSize:14, color:"#00c6ff", fontWeight: 600 }}>✓ {selfies.length} selfie{selfies.length > 1 ? "s" : ""} selected</div>
+                : <><div style={{ fontSize:26, marginBottom:4 }}>🤳</div>
+                   <div style={{ fontSize:13, color:"#888" }}>Tap to add selfies</div></>
               }
             </label>
 
+            {/* Selfie preview grid */}
+            {selfies.length > 0 && (
+              <div className="selfie-grid">
+                {selfies.map((f, i) => (
+                  <SelfiePreviewCard
+                    key={i}
+                    file={f}
+                    onRemove={() => removeSelfie(i)}
+                  />
+                ))}
+              </div>
+            )}
+
             <button className="btn-secondary" onClick={handleFind} disabled={finding} style={{ marginTop:14 }}>
-              {finding ? ><span className="spinner" style={{ borderColor: 'rgba(0,0,0,0.2)', borderTopColor: '#333' }} />Searching…</button> : "✨ Find Me"}
+              {finding ? <><span className="spinner" style={{ borderColor: 'rgba(0,0,0,0.2)', borderTopColor: '#333' }} />Searching…</> : "✨ Find Me"}
             </button>
           </div>
         </div>
